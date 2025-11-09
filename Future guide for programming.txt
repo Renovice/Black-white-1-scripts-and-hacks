@@ -1,0 +1,80 @@
+Ability Engine Flow
+
+The battle engine keeps a big dispatch table (ov_093:0x021F3B88) of “battle scripts.” Each entry points to a small struct/mini-function (e.g., 0x021F0858) that reads battlefield state and enqueues an event via helpers (sub_021f3b8c → FUN_021f3d08).
+FUN_021f3d08 and its siblings pull arguments from FUN_021f165c, call FUN_021e27a4 to build an event record, fill in fields (targets, type, callback pointer), then hand it to FUN_021e27c8 for execution.
+The callback pointer isn’t stored inside the struct itself; it lives in the literal pool used by the dispatcher (here the word at 0x021F0BD8 = 0x021F2BB8). When the event runs, the battle-script interpreter loads this pointer and jumps into the actual handler, which applies the ability’s behavior.
+Data Layout
+
+Record per ability:
+DAT_021F3B88 → pointer 0x021F0858.
+Inside 0x021F0858, offsets 0x0–0x1EB hold state (counters, HP threshold byte at +0x0B, etc.). After the helper code returns (bx lr), the literal pool holds constants the helper loads (ability ID, function references), but the handler pointer for this ability comes via the dispatcher’s pool at 0x021F0BD8.
+The handler (0x021F2BB8) is shared by Overgrow/Torrent/Blaze/Swarm: it checks HP via DivideMaxHp, compares the result, then boosts damage if HP ≤ ⅓.
+What We Changed
+
+Handler patch – At 0x021F2BB8 (file offset 0x22BCA) we replaced adds r1, r7, #0 with movs r1, #1. That forces the divisor passed to the HP check to be 1, so the “HP ≤ 1/3” test is always true and the boost always applies.
+(Earlier approaches involved zeroing the struct threshold bytes at 0x021F0858+0x0B, but the handler patch is cleaner and hits all four abilities simultaneously.)
+Takeaways
+
+Ability scripts chain: Pointer table → struct helper → dispatcher → literal pool pointer → shared handler.
+Literal pools after bx lr often hold constants; handler pointers might live there, but sometimes you must follow the call chain (as we did) to find them (at 0x021F0BD8 here).
+To modify future abilities: find the struct via DAT_021F3B88, trace through the dispatcher (FUN_021f3d08/helpers), locate the literal pointer to the handler, and patch the handler logic (or the struct threshold) as needed.
+
+
+
+
+Here’s the concrete info for the trio abilities:
+
+Ability	File offset of ID hit	Struct base (= offset − 0x1EC)	RAM address (base + 0x021D0000)	ID byte (@+0x1EC)
+Overgrow (0x41)	0x00015A60	0x00015874	0x021E5874	0x41
+Blaze (0x42)	0x0003ADCC	0x0003ABE0	0x0220ABE0	0x42
+Torrent (0x43)	0x0003ADD4	0x0003ABE8	0x0220ABE8	0x43
+How to use this:
+
+Start from the file offsets in the table (find_trio_abilities.ps1 already prints them). Each offset is the location of the ID byte inside the record.
+Subtract 0x1EC to get the struct base (shown above).
+Add 0x021D0000 to convert to RAM if you want to navigate there in Ghidra/BN.
+At each struct base you’ll see the helper function/data blob. The byte at struct_base + 0x1EC is the ability ID (0x41/0x42/0x43 respectively), so you can confirm you’re on the right entry.
+From those helpers, the engine calls the dispatcher (sub_021f3b8c → FUN_021f3d08), which builds an event whose callback pointer is the literal at file offset 0x30BD8 (RAM 0x021F0BD8), resolving to the shared handler 0x021F2BB8. That handler is where we patched ADD R1,R7,#0 → MOVS R1,#1.
+So yes—we can now jump straight to Blaze’s struct at 0x0220ABE0 (or any other ability) and trace it into the shared handler whenever we need to make changes.
+
+
+Back then we were poking at the wrong literal pool (the little table near 0x021F3B88) and assuming its entries were the trio struct bases. Those happened to be other mini-scripts, so reading their +0x1EC bytes didn’t show the IDs we cared about. Once we stepped back, reran find_trio_abilities.ps1, and matched the actual ID hits (e.g., file offset 0x15A60 for 0x41), the real pattern popped out: each ability record lives elsewhere in ov_093, and the ID byte is always at struct_base + 0x1EC. Now that we have the correct struct bases (0x021E5874, 0x0220ABE0, 0x0220ABE8), we can trace them consistently.
+
+And yes—because the ID byte is literally right there in each record (and the event passed to the handler still contains it), we can add ability-specific checks inside the shared handler. For example, in 0x021F2BB8 you could load the ID field from the event, compare it to 0x42, and run custom logic for Blaze while leaving Overgrow/Torrent unchanged. The new understanding just makes it straightforward to locate the right struct and handler paths whenever you need the
+
+
+
+
+
+
+
+Overlay basics
+
+ov_093.bin loads at RAM 0x021D0000.
+Many battle scripts live in this overlay. Ability logic is data-driven: a pointer table points to per-ability records, which enqueue events, which finally call a shared or unique handler.
+Finding an ability’s struct
+
+Search the overlay for the ability ID stored as byte 0xXX followed by 0x00. Your PowerShell script (find_ability.ps1) already does 0xID 0x00.
+Each hit’s file offset is struct_base + 0x1EC. Subtract 0x1EC to get the struct base struct_base = hit - 0x1EC.
+Convert to RAM address for Ghidra/BN with struct_ram = 0x021D0000 + struct_base.
+At struct_ram, you’ll see the helper function/code blob. The byte at +0x1EC is the ability ID (so you can confirm you’ve got the right record).
+Tracing the handler
+
+Each struct helper calls sub_021f3b8c → FUN_021f3d08 (or its sibling) to build an event.
+The dispatcher writes a callback pointer pulled from a literal pool (e.g., file 0x30BD8 → RAM 0x021F0BD8). That literal is the handler address. Jump there to tweak behavior.
+For Overgrow/Blaze/Torrent/Swarm the literal is 0x021F2BB8.
+For Volt Absorb (ID 0x0A), the literal table entry at 0x39F6C points to handler 0x021D123D.
+Patching
+
+Once in the handler, patch instructions as needed (e.g., change adds r1,r7,#0 → movs r1,#1 to bypass the HP gate).
+If you need ability-specific logic inside a shared handler, load the ID from the event (the struct helper wrote it) and branch.
+Summary workflow
+
+Run find_ability.ps1 with the desired ID.
+For each hit:
+struct_base = offset – 0x1EC
+struct_ram = 0x021D0000 + struct_base
+Jump to struct_ram in Ghidra/BN, follow the helper into sub_021f3b8c/FUN_021f3d08.
+Inspect the literal pool used there; the 4-byte value (often found at file 0x30BD8 or similar) gives the handler address.
+Jump to the handler and edit the code.
+That’s everything you need to repeat what we did for the starter abilities or to patch completely different abilities like Volt Absorb.
