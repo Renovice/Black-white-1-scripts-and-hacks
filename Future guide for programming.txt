@@ -77,4 +77,41 @@ struct_ram = 0x021D0000 + struct_base
 Jump to struct_ram in Ghidra/BN, follow the helper into sub_021f3b8c/FUN_021f3d08.
 Inspect the literal pool used there; the 4-byte value (often found at file 0x30BD8 or similar) gives the handler address.
 Jump to the handler and edit the code.
+
 That’s everything you need to repeat what we did for the starter abilities or to patch completely different abilities like Volt Absorb.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---------------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+Found the exact BW1 function that matches the BW2 “CommonLowHPBoostAbility” byte pattern. It starts at file offset 0x22BB8 (RAM 0x021F2BB8), and contained the 06 1C 39 1C FE F7 48 FF sequence. I changed that 39 1C (MOVS R1,R7) to 01 21 (MOVS R1,#1), so the bytes at offsets 0x22BC8–0x22BD1 now read:
+
+06 1C 01 21 FE F7 48 FF 05 1C
+This is the only MOVS R1,R7 in that handler, so no second patch was required. Give the build a try; if the boost still doesn’t trigger, let me know and we can double‑check neighboring routines.
+
+that worked
+
+is what u said
